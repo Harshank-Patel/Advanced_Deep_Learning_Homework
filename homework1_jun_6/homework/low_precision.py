@@ -1,7 +1,6 @@
 from pathlib import Path
 
 import torch
-import torch.nn.functional as F
 
 from .bignet import BIGNET_DIM, LayerNorm  # noqa: F401
 
@@ -88,7 +87,7 @@ class Linear4Bit(torch.nn.Module):
             # Hint: You can use torch.nn.functional.linear
             quantized_weight_shape = (self.weight_q4.size(0) * self.weight_q4.size(1) * 2,)
             weight = block_dequantize_4bit(self.weight_q4, self.weight_norm).view(self._shape)
-            out = F.linear(x, weight, self.bias)
+            out = torch.nn.functional.linear(x, weight, self.bias)
         return out
 
 
