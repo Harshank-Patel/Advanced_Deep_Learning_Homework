@@ -180,3 +180,5 @@ cython_debug/
 .cursorignore
 .cursorindexingignore
 *.json
+/homework2_jul_4/data
+homework2_jul_4/supertux_data.zip
