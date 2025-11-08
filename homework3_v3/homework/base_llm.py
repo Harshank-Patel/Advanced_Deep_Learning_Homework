@@ -105,7 +105,57 @@ class BaseLLM:
                 for r in self.batched_generate(prompts[idx : idx + micro_batch_size], num_return_sequences, temperature)
             ]
 
-        raise NotImplementedError()
+        # Set padding side to left to align sequences on the right where generation starts
+        self.tokenizer.padding_side = "left"
+        
+        # Tokenize prompts with padding and convert to PyTorch tensor
+        # This handles making all sequences the same length through left padding
+        inputs = self.tokenizer(
+            prompts,
+            padding=True,
+            return_tensors="pt"
+        ).to(self.device)
+
+        # Set up generation config
+        generate_kwargs = {
+            "input_ids": inputs["input_ids"],
+            "attention_mask": inputs["attention_mask"],  # Required for handling padded sequences
+            "max_new_tokens": 50,
+            "eos_token_id": self.tokenizer.eos_token_id,
+            "pad_token_id": self.tokenizer.pad_token_id
+        }
+
+        # Configure temperature and sampling
+        if temperature > 0:
+            generate_kwargs.update({
+                "do_sample": True,
+                "temperature": temperature
+            })
+        
+        # Add num_return_sequences if specified
+        if num_return_sequences is not None:
+            generate_kwargs["num_return_sequences"] = num_return_sequences
+
+        # Generate the sequences
+        outputs = self.model.generate(**generate_kwargs)
+        
+        # Only decode the newly generated tokens (skip input tokens)
+        input_length = inputs["input_ids"].shape[1]
+        decoded = self.tokenizer.batch_decode(
+            outputs[:, input_length:],
+            skip_special_tokens=True
+        )
+
+        # If num_return_sequences was specified, reshape the output
+        if num_return_sequences is not None:
+            # Reshape into list of lists, where each inner list contains
+            # num_return_sequences generations for one prompt
+            return [
+                decoded[i:i + num_return_sequences]
+                for i in range(0, len(decoded), num_return_sequences)
+            ]
+        
+        return decoded
 
     def answer(self, *questions) -> list[float]:
         """
