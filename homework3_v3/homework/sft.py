@@ -1,3 +1,9 @@
+import os
+
+# Avoid tokenizer parallelism warnings when the process gets forked by the
+# DataLoader. Set this early before any tokenizers are imported/used.
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
 from .base_llm import BaseLLM
 from .data import Dataset, benchmark
 
@@ -49,7 +55,13 @@ def format_example(prompt: str, answer: str) -> dict[str, str]:
     """
     Construct a question / answer pair. Consider rounding the answer to make it easier for the LLM.
     """
-    raise NotImplementedError()
+    # Round answer to reasonable precision to make it easier for the model
+    rounded_answer = f"{float(answer):.4f}"
+    
+    return {
+        "question": prompt,
+        "answer": f"<answer>{rounded_answer}</answer>"
+    }
 
 
 class TokenizedDataset:
@@ -78,8 +90,82 @@ def train_model(
     output_dir: str,
     **kwargs,
 ):
-    raise NotImplementedError()
-    test_model(output_dir)
+    """
+    Train the model using LoRA adapter.
+    Args:
+        output_dir: Directory to save model checkpoints
+    """
+    # Initialize base model
+    llm = BaseLLM()
+    
+    # Get training dataset
+    trainset = Dataset("train")
+    
+    # Configure LoRA adapter
+    from peft import get_peft_model, LoraConfig
+    lora_config = LoraConfig(
+        target_modules="all-linear",
+        r=16,  # Rank for adapter, adjust to stay under 20MB
+        lora_alpha=64,  # alpha = 4*r
+        bias="none",
+        task_type="CAUSAL_LM"
+    )
+    
+    # Create LoRA model
+    llm.model = get_peft_model(llm.model, lora_config)
+    llm.model.enable_input_require_grads()
+
+    # When using gradient checkpointing, generation cache must be disabled.
+    # Explicitly set use_cache=False on the model config to avoid Trainer warnings
+    # and ensure correct memory behaviour.
+    if hasattr(llm.model, "config"):
+        try:
+            llm.model.config.use_cache = False
+        except Exception:
+            # Non-fatal: some wrappers may not expose config in the same way
+            pass
+    
+    # Create tokenized dataset
+    train_dataset = TokenizedDataset(llm.tokenizer, trainset, format_example)
+    
+    # Configure training arguments
+    from transformers import TrainingArguments
+    training_args = TrainingArguments(
+        output_dir=output_dir,
+        logging_dir=output_dir,
+        report_to="tensorboard",
+        gradient_checkpointing=True,
+        fp16=True,
+        dataloader_num_workers=4,
+        dataloader_pin_memory=False,
+        learning_rate=2e-4,
+        num_train_epochs=5,
+        per_device_train_batch_size=32,
+        save_strategy="epoch",
+        save_total_limit=3,
+    )
+    
+    # Create and run trainer
+    from transformers import Trainer
+    trainer = Trainer(
+        model=llm.model,
+        args=training_args,
+        train_dataset=train_dataset,
+    )
+    
+    # Train the model
+    trainer.train()
+    
+    # Ensure output directory exists and save final LoRA adapter there.
+    from pathlib import Path
+    out_path = Path(output_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
+
+    # Save the PEFT adapter and any related config files to the output dir.
+    llm.model.save_pretrained(str(out_path))
+
+    # Test the trained model using the same output directory (local path).
+    test_model(str(out_path))
 
 
 def test_model(ckpt_path: str):
@@ -89,7 +175,48 @@ def test_model(ckpt_path: str):
     # Load the model with LoRA adapters
     from peft import PeftModel
 
-    llm.model = PeftModel.from_pretrained(llm.model, ckpt_path).to(llm.device)
+    # Prefer local checkpoint directories. If the provided path doesn't exist or
+    # doesn't contain the adapter config, try to find the latest `checkpoint-*`
+    # inside the provided run directory. As a final fallback, try
+    # `homework/sft_model`.
+    from pathlib import Path
+    ckpt = Path(ckpt_path)
+
+    alt = Path(__file__).parent / "sft_model"
+
+    # If ckpt doesn't exist, try alt
+    if not ckpt.exists():
+        if alt.exists():
+            print(f"Warning: checkpoint '{ckpt_path}' not found. Falling back to '{alt}'.")
+            ckpt = alt
+        else:
+            raise ValueError(
+                f"Checkpoint path '{ckpt_path}' does not exist and no fallback found at '{alt}'.\n"
+                "Make sure you pass the local output_dir used during training or save the adapter with `llm.model.save_pretrained(output_dir)`"
+            )
+
+    # If the provided path is a run folder (contains checkpoint-*), try to find the
+    # latest checkpoint that contains adapter files.
+    if not (ckpt / "adapter_config.json").exists():
+        # search for checkpoint-* subdirs
+        checkpoints = sorted([d for d in ckpt.iterdir() if d.is_dir() and d.name.startswith("checkpoint-")], key=lambda p: int(p.name.split("-")[-1]) if p.name.split("-")[-1].isdigit() else -1)
+        if checkpoints:
+            latest = checkpoints[-1]
+            if (latest / "adapter_config.json").exists():
+                print(f"Using latest checkpoint '{latest}' inside '{ckpt}'.")
+                ckpt = latest
+        # if still not found, fallback to alt
+    if not (ckpt / "adapter_config.json").exists():
+        if alt.exists() and (alt / "adapter_config.json").exists():
+            print(f"Falling back to local adapter at '{alt}'.")
+            ckpt = alt
+        else:
+            raise ValueError(
+                f"Adapter config not found in '{ckpt}' or any checkpoints inside it.\n"
+                "Please ensure the PEFT adapter was saved locally (e.g. with `llm.model.save_pretrained(output_dir)`)"
+            )
+
+    llm.model = PeftModel.from_pretrained(llm.model, str(ckpt)).to(llm.device)
 
     benchmark_result = benchmark(llm, testset, 100)
     print(f"{benchmark_result.accuracy=}  {benchmark_result.answer_rate=}")
