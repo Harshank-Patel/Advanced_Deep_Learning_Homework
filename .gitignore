@@ -182,3 +182,4 @@ cython_debug/
 *.json
 /homework2_jul_4/data
 homework2_jul_4/supertux_data.zip
+homework3_v3/runs/*
