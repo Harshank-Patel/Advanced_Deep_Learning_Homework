@@ -59,11 +59,17 @@ def train_model(
     # Initialize base model
     llm = BaseLLM()
 
+    # Allow overriding some training / LoRA params via kwargs for easy tuning
+    lora_r = int(kwargs.get("lora_r", 16))
+    lora_alpha = int(kwargs.get("lora_alpha", 4 * lora_r))
+    use_fp16 = bool(kwargs.get("fp16", False))
+    per_device_batch = int(kwargs.get("per_device_train_batch_size", 4))
+
     # LoRA config (can use higher rank if needed, but keep <50MB)
     lora_config = LoraConfig(
         target_modules="all-linear",
-        r=32,  # Higher rank for RFT, adjust if needed
-        lora_alpha=128,  # alpha = 4*r
+        r=lora_r,
+        lora_alpha=lora_alpha,
         bias="none",
         task_type="CAUSAL_LM"
     )
@@ -84,15 +90,23 @@ def train_model(
         logging_dir=output_dir,
         report_to="tensorboard",
         gradient_checkpointing=True,
-        fp16=True,
-        dataloader_num_workers=4,
+        # Disable fp16 by default for MPS / macOS. Enable manually on CUDA GPUs.
+        fp16=use_fp16,
+        # Use conservative dataloader workers on macOS to avoid fork issues.
+        dataloader_num_workers=0,
         dataloader_pin_memory=False,
         learning_rate=2e-4,
-        num_train_epochs=5,
-        per_device_train_batch_size=32,
+        num_train_epochs=int(kwargs.get("num_train_epochs", 8)),
+        weight_decay=float(kwargs.get("weight_decay", 0.01)),
+        # Smaller default batch size to avoid OOM on memory-constrained devices
+        per_device_train_batch_size=per_device_batch,
         save_strategy="epoch",
         save_total_limit=3,
     )
+
+    print("Training with config:")
+    print(f"  lora_r={lora_r} lora_alpha={lora_alpha} fp16={use_fp16} per_device_batch={per_device_batch}")
+    print(f"  num_train_epochs={training_args.num_train_epochs} weight_decay={training_args.weight_decay}")
 
     # Trainer
     trainer = Trainer(
