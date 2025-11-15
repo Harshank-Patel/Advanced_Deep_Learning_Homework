@@ -1,0 +1,67 @@
+[
+  [
+    "Can you change 2 hour to its equivalent in min?",
+    120.0,
+    "1 hour = 60 minutes. 2 * 60 = <answer>120</answer>"
+  ],
+  [
+    "What is the conversion of 2 hour to seconds?",
+    7200.0,
+    "1 hour = 3600 seconds. 2 * 3600 = <answer>7200</answer>"
+  ],
+  [
+    "How many gram are there per 6 kg?",
+    6000.0,
+    "6 kg = 6000 grams. 6000 / 1 = 6000. So, <answer>6000</answer> gram are there per 6 kg."
+  ],
+  [
+    "How much is 10 pint when converted to milliliter?",
+    4731.764730000003,
+    "1 pint is 473.176 milliliters. 10 * 473.176 = <answer>4731.76</answer> milliliters."
+  ],
+  [
+    "Convert the measurement of 6 l into cm^3.",
+    5999.999999999999,
+    "1 L = 1000 cm^3. 6 * 1000 = <answer>6000</answer> cm^3"
+  ],
+  [
+    "Can you change 9 metric ton to its equivalent in kg?",
+    9000.0,
+    "1 metric ton = 1000 kg. 9 * 1000 = <answer>9000</answer>"
+  ],
+  [
+    "What is the conversion of 3 quart to fluid ounce?",
+    96.0,
+    "1 quart = 32 fluid ounces. 3 * 32 = <answer>96</answer>"
+  ],
+  [
+    "Convert the measurement of 2 B into bit.",
+    16.0,
+    "1 byte (B) = 8 bits. 2 * 8 = <answer>16</answer>"
+  ],
+  [
+    "How many in are there per 8 ft?",
+    96.0,
+    "1 ft = 12 inches. 8 * 12 = <answer>96</answer>"
+  ],
+  [
+    "Express 8 liter as a quantity of milliliter.",
+    8000.000000000001,
+    "1 liter = 1000 milliliters. 8 * 1000 = <answer>8000</answer>"
+  ],
+  [
+    "Could you provide the value of 2 pound in ounce?",
+    32.0,
+    "1 pound = 16 ounces. 2 * 16 = <answer>32</answer>"
+  ],
+  [
+    "How many m/s are there per 10 ft/s?",
+    3.048,
+    "1 ft/s = 0.3048 m/s. 10 * 0.3048 = <answer>3.048</answer>"
+  ],
+  [
+    "How do we translate 3 litre into cc?",
+    2999.9999999999995,
+    "1 litre = 1000 cc. 3 * 1000 = <answer>3000</answer>"
+  ]
+]
