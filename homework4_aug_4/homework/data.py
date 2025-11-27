@@ -61,7 +61,11 @@ class VQADataset:
 
 class CaptionDataset:
     def __init__(self, split: str, data_dir: Path = None, max_samples: int = None):
-        self.data_dir = data_dir or DATA_DIR
+        # Ensure we always store a Path object
+        if data_dir is None:
+            self.data_dir = DATA_DIR
+        else:
+            self.data_dir = Path(data_dir)
 
         self.captions = []
 
@@ -91,12 +95,18 @@ class CaptionDataset:
 
 class MultiChoiceQADataset:
     def __init__(self, split: str, data_dir: Path = None, max_samples: int = None):
-        self.data_dir = data_dir or DATA_DIR
+        if data_dir is None:
+            self.data_dir = DATA_DIR
+        else:
+            self.data_dir = Path(data_dir)
 
-        metafile = f"{self.data_dir}/{split}/all_mc_qas.json"
+        metafile = self.data_dir / split / "all_mc_qas.json"
 
         with open(metafile) as f:
             self.qa_pairs = json.load(f)
+
+        if max_samples is not None:
+            self.qa_pairs = self.qa_pairs[:max_samples]
 
         print(f"Loaded {len(self.qa_pairs)} QA pairs for {split} split")
 

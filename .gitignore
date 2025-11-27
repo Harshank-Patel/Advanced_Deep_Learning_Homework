@@ -183,3 +183,7 @@ cython_debug/
 /homework2_jul_4/data
 homework2_jul_4/supertux_data.zip
 homework3_v3/runs/*
+/homework4_aug_4/data
+homework4_aug_4/supertux_data.zip
+*.zip
+/homework4_aug_4/homework/clip_model_debug

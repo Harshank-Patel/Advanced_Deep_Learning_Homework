@@ -115,7 +115,7 @@ python -m homework.clip train
 Once you finished the assignment, create a submission bundle using:
 
 ```bash
-python3 bundle.py homework [YOUR UT ID]
+python3 bundle.py homework hdp526
 ```
 
 Delete any old checkpoints from your homework directory to keep the model size below 50MB.
@@ -124,7 +124,7 @@ Submit the zip file on Canvas. Please note that the maximum file size our grader
 Please double-check that your zip file was properly created, by grading it again:
 
 ```bash
-python3 -m grader [YOUR UT ID].zip
+python3 -m grader hdp526.zip
 ```
 
 ## Online grader
