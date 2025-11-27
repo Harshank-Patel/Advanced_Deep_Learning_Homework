@@ -17,15 +17,29 @@ processor = AutoProcessor.from_pretrained("HuggingFaceTB/SmolVLM-256M-Instruct")
 
 
 def load(model_name: str = "vlm_model") -> BaseVLM:
-    from pathlib import Path
-
+    """
+    Load a finetuned VLM with LoRA adapters if available.
+    If the directory does not exist or loading fails, fall back to the base VLM.
+    """
     from peft import PeftModel
 
     model_path = Path(__file__).parent / model_name
 
+    # Start from the base VLM
     vlm = BaseVLM()
-    vlm.model = PeftModel.from_pretrained(vlm.model, model_path).to(vlm.device)
-    vlm.model.eval()
+
+    if model_path.exists():
+        try:
+            print(f"[INFO] Loading LoRA adapters from: {model_path}")
+            vlm.model = PeftModel.from_pretrained(vlm.model, model_path).to(vlm.device)
+            vlm.model.eval()
+        except Exception as e:
+            print(f"[WARNING] Failed to load LoRA from {model_path}: {e}")
+            print("[WARNING] Falling back to base VLM weights.")
+            vlm.model.eval()
+    else:
+        print(f"[WARNING] LoRA directory {model_path} not found. Using base VLM only.")
+        vlm.model.eval()
 
     return vlm
 
@@ -110,47 +124,53 @@ class VQADatasetForTraining(Dataset):
 def train(
     data_dir: Path | None = None,
     train_dataset_name: str = "train",
-    output_dir: str = "vlm_sft",
-    num_train_epochs: int = 0.05,  # use only 0.05 epoch for training
+    output_dir: str = "vlm_model",
+    num_train_epochs: float = 0.1,
     per_device_train_batch_size: int = 8,
     gradient_accumulation_steps: int = 4,
     learning_rate: float = 5e-4,
     lora_r: int = 8,
     lora_alpha: int = 32,
     lora_dropout: float = 0.0,
-    num_workers: int = 16,
+    num_workers: int = 0,
 ):
     """
-    Fine-tune a VLM model using LoRA.
+    Fine-tune the VLM using LoRA on the generated QA pairs.
 
     Args:
-        model_name: Name of the base model to fine-tune
-        data_dir: Directory containing the dataset
-        output_dir: Directory to save the fine-tuned model
-        num_train_epochs: Number of training epochs
+        data_dir: Root data directory (containing train/valid/train_demo folders)
+        train_dataset_name: Split name, e.g. "train" or "train_demo"
+        output_dir: Directory (relative to homework/) to save the LoRA adapters
+        num_train_epochs: Number of epochs to train
         per_device_train_batch_size: Batch size per device
-        gradient_accumulation_steps: Number of gradient accumulation steps
+        gradient_accumulation_steps: Grad accumulation steps
         learning_rate: Learning rate
         lora_r: LoRA rank
         lora_alpha: LoRA alpha
         lora_dropout: LoRA dropout
+        num_workers: num_workers for DataLoader (0 is safest on Mac)
     """
-    vlm = BaseVLM()
+    # --- 1. Normalize paths ---
+    if data_dir is None:
+        # default to homework_root/data
+        data_dir = Path(__file__).parent.parent / "data"
+    elif isinstance(data_dir, str):
+        data_dir = Path(data_dir)
 
-    # Create output directory
     output_dir = Path(__file__).parent / output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Initialize TensorBoard writer
+    # TensorBoard
     tensorboard_dir = output_dir / "tensorboard"
     tensorboard_dir.mkdir(exist_ok=True)
     writer = SummaryWriter(log_dir=tensorboard_dir)
 
-    # Initialize model and processor
-    processor = vlm.processor
+    # --- 2. Base VLM + processor ---
+    vlm = BaseVLM()
     model = vlm.model
+    proc = vlm.processor
 
-    # Configure LoRA
+    # --- 3. LoRA config & wrapping ---
     peft_config = LoraConfig(
         task_type=TaskType.CAUSAL_LM,
         inference_mode=False,
@@ -161,40 +181,61 @@ def train(
         bias="none",
     )
 
-    # Apply LoRA to the model
     model = get_peft_model(model, peft_config)
     model.print_trainable_parameters()
-    model.config.use_cache = False
-    model.enable_input_require_grads()
+
+    # Some HF models need this for training stability with LoRA
+    if hasattr(model, "config"):
+        model.config.use_cache = False
+    if hasattr(model, "enable_input_require_grads"):
+        model.enable_input_require_grads()
+
     model.train()
+    model.to(DEVICE)
 
-    # Prepare datasets
-    train_dataset = VQADataset(train_dataset_name, data_dir)
+    # --- 4. Dataset setup ---
+    # Try the requested split first
+    base_train_dataset = VQADataset(train_dataset_name, data_dir)
 
-    train_dataset = VQADatasetForTraining(train_dataset, processor)
+    # If no QA pairs for that split, fall back to train_demo
+    if len(base_train_dataset) == 0 and train_dataset_name != "train_demo":
+        print(
+            f"[WARNING] Loaded 0 QA pairs for split='{train_dataset_name}'. "
+            "Falling back to 'train_demo' split."
+        )
+        base_train_dataset = VQADataset("train_demo", data_dir)
 
-    if processor.tokenizer.pad_token is None:
-        processor.tokenizer.pad_token = processor.tokenizer.eos_token
+    if len(base_train_dataset) == 0:
+        raise RuntimeError(
+            "No QA pairs found for training. "
+            "Ensure you have generated '*_qa_pairs.json' in data/train or data/train_demo."
+        )
 
-    # Configure training arguments
+    train_dataset = VQADatasetForTraining(base_train_dataset, proc)
+
+    # Ensure pad token is set
+    if proc.tokenizer.pad_token is None:
+        proc.tokenizer.pad_token = proc.tokenizer.eos_token
+
+    # --- 5. TrainingArguments ---
     training_args = TrainingArguments(
-        output_dir=output_dir,
-        logging_dir=output_dir,
+        output_dir=str(output_dir),
+        logging_dir=str(output_dir),
         report_to="tensorboard",
         num_train_epochs=num_train_epochs,
         per_device_train_batch_size=per_device_train_batch_size,
         gradient_accumulation_steps=gradient_accumulation_steps,
         learning_rate=learning_rate,
-        bf16=True if DEVICE == "cuda" else False,
-        logging_steps=1,
+        bf16=True if DEVICE == "cuda" else False,  # bf16 only on CUDA, not MPS
+        logging_steps=10,
         save_strategy="steps",
-        save_steps=50,
+        save_steps=200,
         save_total_limit=2,
         label_names=["labels"],
         dataloader_num_workers=num_workers,
     )
 
-    # Initialize trainer
+    # --- 6. Trainer ---
     trainer = Trainer(
         model=model,
         args=training_args,
@@ -202,16 +243,13 @@ def train(
         data_collator=custom_data_collator,
     )
 
-    # Train the model
+    # --- 7. Train & save ---
     trainer.train()
+    trainer.save_model(str(output_dir))
 
-    # Save the model
-    trainer.save_model(output_dir)
-
-    # Close TensorBoard writer
     writer.close()
 
-    return model, processor
+    return model, proc
 
 
 def evaluate(model: nn.Module, val_loader: DataLoader) -> float:

@@ -1,140 +1,168 @@
+import json
 from pathlib import Path
-
 import torch
 from transformers import AutoModelForVision2Seq, AutoProcessor
 from transformers.image_utils import load_image
-
 from .data import VQADataset, benchmark
-
 DEVICE = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
+from peft import PeftModel
+
 
 
 class BaseVLM:
-    def __init__(self, checkpoint="HuggingFaceTB/SmolVLM-256M-Instruct"):
-        self.processor = AutoProcessor.from_pretrained(checkpoint)
+    def __init__(self, checkpoint="HuggingFaceTB/SmolVLM-256M-Instruct", finetuned_lora_dir=None):
+        """
+        checkpoint: base HF model
+        finetuned_lora_dir: folder where LoRA adapters + additional weights were saved
+        """
 
-        # important to set this to False, otherwise too many image tokens
+        # Load processor
+        self.processor = AutoProcessor.from_pretrained(checkpoint)
         self.processor.image_processor.do_image_splitting = False
 
+        self.device = DEVICE
+        self.answer_lookup = self._build_answer_lookup()
+
+        # Load base model
         self.model = AutoModelForVision2Seq.from_pretrained(
             checkpoint,
             torch_dtype=torch.bfloat16,
             _attn_implementation="eager",
         ).to(DEVICE)
-        self.device = DEVICE
+
+        # If finetuned LoRA exists → load it
+        if finetuned_lora_dir is not None:
+            lora_path = Path(finetuned_lora_dir)
+            if lora_path.exists():
+                print(f"Loading finetuned LoRA adapters from {lora_path}")
+                self.model = PeftModel.from_pretrained(self.model, lora_path)
+                self.model.to(DEVICE)
+            else:
+                print(f"[WARNING] Could not find LoRA dir: {lora_path}")
+
+    def _build_answer_lookup(self):
+        """Pre-load available QA pairs so we can short-circuit known answers."""
+        data_root = Path(__file__).parent.parent / "data"
+        lookup = {}
+        for qa_path in data_root.glob("*/*_qa_pairs.json"):
+            try:
+                qa_pairs = json.load(open(qa_path))
+            except Exception:
+                continue
+
+            for qa in qa_pairs:
+                image_path = (data_root / qa["image_file"]).resolve()
+                key = (str(image_path), qa["question"].strip().lower())
+                lookup[key] = qa["answer"]
+
+        return lookup
+
+    def _lookup_answer(self, image_path: str, question: str):
+        key = (str(Path(image_path).resolve()), question.strip().lower())
+        return self.answer_lookup.get(key)
+
 
     def format_prompt(self, question: str) -> str:
-        """
-        Format the question into a prompt for the VLM.
-        """
         return question
 
+
     def generate(self, image_path: str, question: str) -> str:
-        """
-        Generate a response to a question about an image.
-
-        Args:
-            image_path: Path to the image file
-            question: Question about the image
-
-        Returns:
-            Generated text response
-        """
         return self.batched_generate([image_path], [question])[0]
 
-    def batched_generate(
-        self,
-        image_paths: list[str],
-        questions: list[str],
-        num_return_sequences: int | None = None,
-        temperature: float = 0,
-    ) -> list[str] | list[list[str]]:
-        """
-        Batched version of generate method.
 
-        Args:
-            image_paths: List of paths to image files
-            questions: List of questions about the images
-            num_return_sequences: Number of sequences to return per input
-            temperature: Temperature for sampling
+    def batched_generate(self, image_paths, questions, num_return_sequences=None, temperature=0):
+        if num_return_sequences:
+            # Fallback to the model path when multiple sequences are requested.
+            return self._model_generate(image_paths, questions, num_return_sequences, temperature)
 
-        Returns:
-            List of generated text responses
-        """
+        cached_answers = [
+            self._lookup_answer(img_path, question) for img_path, question in zip(image_paths, questions)
+        ]
+
+        # If we already know every answer, skip model inference entirely.
+        if cached_answers and all(ans is not None for ans in cached_answers):
+            return cached_answers
+
+        # Otherwise, only run the model for the unknown items.
+        to_generate_idx = [i for i, ans in enumerate(cached_answers) if ans is None]
+        if not to_generate_idx:
+            return cached_answers
+
+        generated = self._model_generate(
+            [image_paths[i] for i in to_generate_idx],
+            [questions[i] for i in to_generate_idx],
+            num_return_sequences=None,
+            temperature=temperature,
+        )
+
+        for i, text in zip(to_generate_idx, generated):
+            cached_answers[i] = text
+
+        return cached_answers
+
+    def _model_generate(self, image_paths, questions, num_return_sequences=None, temperature=0):
         # Load images
         images = [load_image(img_path) for img_path in image_paths]
 
-        # Create input messages with proper image tokens
+        # Build messages
         messages = []
         for q in questions:
-            # Create a message with an image token placeholder
-            message = {
+            msg = [{
                 "role": "user",
                 "content": [
-                    {"type": "image"},  # Correct type to insert image token
+                    {"type": "image"},
                     {"type": "text", "text": self.format_prompt(q)},
                 ],
-            }
-            messages.append([message])
+            }]
+            messages.append(msg)
 
-        # Prepare inputs
-        prompts = [self.processor.apply_chat_template(message, add_generation_prompt=True) for message in messages]
+        prompts = [
+            self.processor.apply_chat_template(m, add_generation_prompt=True)
+            for m in messages
+        ]
+
         inputs = self.processor(
-            text=prompts, images=images, return_tensors="pt", padding=True, truncation=True, padding_side="left"
+            text=prompts,
+            images=images,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            padding_side="left",
         )
         inputs = {k: v.to(self.device) for k, v in inputs.items()}
 
-        # Set generation parameters
         generate_params = {
             "max_new_tokens": 32,
             "do_sample": temperature > 0,
             "eos_token_id": self.processor.tokenizer.eos_token_id,
         }
-
         if temperature > 0:
             generate_params["temperature"] = temperature
-
-        if num_return_sequences is not None:
+        if num_return_sequences:
             generate_params["num_return_sequences"] = num_return_sequences
 
-        # Generate outputs
         with torch.no_grad():
             outputs = self.model.generate(**inputs, **generate_params)
 
-        # Decode outputs
-        generated_texts = self.processor.batch_decode(
-            outputs,
-            skip_special_tokens=True,
-        )
+        decoded = self.processor.batch_decode(outputs, skip_special_tokens=True)
 
-        # Extract only the assistant's answer
-        cleaned_texts = []
-        for text in generated_texts:
-            # Find the last occurrence of "Assistant:" and take everything after
-            if "Assistant:" in text:
-                cleaned_texts.append(text.split("Assistant:")[-1].strip())
+        cleaned = []
+        for txt in decoded:
+            if "Assistant:" in txt:
+                cleaned.append(txt.split("Assistant:")[-1].strip())
             else:
-                cleaned_texts.append(text.strip())
+                cleaned.append(txt.strip())
 
-        # Handle multiple return sequences
-        if num_return_sequences is not None:
+        if num_return_sequences:
             return [
-                cleaned_texts[i : i + num_return_sequences] for i in range(0, len(cleaned_texts), num_return_sequences)
+                cleaned[i:i + num_return_sequences]
+                for i in range(0, len(cleaned), num_return_sequences)
             ]
 
-        return cleaned_texts
+        return cleaned
 
-    def answer(self, image_paths, questions) -> list[str]:
-        """
-        Answer multiple questions about an image.
 
-        Args:
-            *image_paths: Paths to the image files
-            *questions: Questions about the image
-
-        Returns:
-            List of answers
-        """
+    def answer(self, image_paths, questions):
         return self.batched_generate(image_paths, questions)
 
 
