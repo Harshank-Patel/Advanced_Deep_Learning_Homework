@@ -115,7 +115,7 @@ python -m homework.clip train
 Once you finished the assignment, create a submission bundle using:
 
 ```bash
-python3 bundle.py homework hdp526
+python3 bundle.py homework hdp526.zip
 ```
 
 Delete any old checkpoints from your homework directory to keep the model size below 50MB.

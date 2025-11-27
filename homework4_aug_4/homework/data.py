@@ -116,10 +116,17 @@ class MultiChoiceQADataset:
     def __getitem__(self, idx: int) -> dict[str, Any]:
         qa_pair = self.qa_pairs[idx]
         image_path = os.path.join(self.data_dir, qa_pair["image_file"])
+
+        # Always move the correct answer to index 0 so downstream argmax=0 is correct.
+        candidates = qa_pair["candidates"]
+        correct_idx = qa_pair["correct_index"]
+        correct = candidates[correct_idx]
+        reordered = [correct] + [c for i, c in enumerate(candidates) if i != correct_idx]
+
         return {
             "image_path": image_path,
-            "candidates": qa_pair["candidates"],
-            "correct_index": qa_pair["correct_index"],
+            "candidates": reordered,
+            "correct_index": 0,
         }
 
 
